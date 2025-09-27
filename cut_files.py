@@ -15,6 +15,7 @@ def clear_directory(folder):
                 shutil.rmtree(file_path)
         except Exception as e:
             print('Failed to delete %s. Reason: %s' % (file_path, e))
+
 def pdf_to_image(pdf_path, page_num, dpi=300):
     """Converts a specific page of a PDF to an OpenCV image."""
     doc = fitz.open(pdf_path)
@@ -73,49 +74,71 @@ def assign_text_to_images(text_boxes, image_boxes, row_gap=50):
             rows.append(row_text)
     return rows
 
-# def cluster_by_rows(text_boxes, row_gap=50):
-#     """
-#     Groups text boxes into rows based on their vertical position.
-#     row_gap: max vertical distance between centers to be considered the same row
-#     """
-#     if not text_boxes:
-#         return []
-
-#     # Sort by vertical position (y coordinate of center)
-#     text_boxes = sorted(text_boxes, key=lambda b: b[1] + b[3]//2)
-
-#     rows = []
-#     current_row = [text_boxes[0]]
-#     current_center_y = text_boxes[0][1] + text_boxes[0][3]//2
-
-#     for box in text_boxes[1:]:
-#         _, y, _, h, _ = box
-#         center_y = y + h//2
-#         if abs(center_y - current_center_y) <= row_gap:
-#             current_row.append(box)
-#             current_center_y = np.mean([b[1] + b[3]//2 for b in current_row])
-#         else:
-#             rows.append(current_row)
-#             current_row = [box]
-#             current_center_y = center_y
-
-#     rows.append(current_row)
-#     return rows
-
-def row_overlaps_image(row_boxes, image_boxes):
+def detect_product_columns_in_row(row_img, text_boxes_in_row, min_column_width=200, gap_threshold=50):
     """
-    Check if a row of text overlaps with any detected image box.
+    Detects individual product columns within a product row.
+    
+    Args:
+        row_img: The image of the product row
+        text_boxes_in_row: List of text boxes within this row (relative to row coordinates)
+        min_column_width: Minimum width for a column to be considered valid
+        gap_threshold: Minimum gap between columns
+    
+    Returns:
+        List of column bounding boxes (x, y, w, h) relative to the row image
     """
-    if not row_boxes or not image_boxes:
-        return False
-    # Row vertical span
-    min_y = min(b[1] for b in row_boxes)
-    max_y = max(b[1] + b[3] for b in row_boxes)
-    for (x, y, w, h) in image_boxes:
-        if y < max_y and (y + h) > min_y:  # vertical overlap
-            return True
-    return False
-
+    if not text_boxes_in_row:
+        # If no text boxes, return the entire row as one column
+        return [(0, 0, row_img.shape[1], row_img.shape[0])]
+    
+    # Get horizontal positions of all text elements
+    x_positions = []
+    for box in text_boxes_in_row:
+        x, y, w, h, text = box
+        x_positions.extend([x, x + w])  # Add both left and right edges
+    
+    x_positions = sorted(set(x_positions))  # Remove duplicates and sort
+    
+    # Find gaps between text elements
+    gaps = []
+    for i in range(len(x_positions) - 1):
+        gap_start = x_positions[i]
+        gap_end = x_positions[i + 1]
+        gap_width = gap_end - gap_start
+        
+        # Check if this gap has no text overlapping
+        has_text_in_gap = any(
+            box[0] < gap_end and box[0] + box[2] > gap_start
+            for box in text_boxes_in_row
+        )
+        
+        if not has_text_in_gap and gap_width >= gap_threshold:
+            gaps.append((gap_start, gap_end, gap_width))
+    
+    # Create columns based on gaps
+    columns = []
+    row_height = row_img.shape[0]
+    row_width = row_img.shape[1]
+    
+    if not gaps:
+        # No significant gaps found, treat as single column
+        columns.append((0, 0, row_width, row_height))
+    else:
+        # Sort gaps by position
+        gaps = sorted(gaps, key=lambda g: g[0])
+        
+        # Create columns between gaps
+        prev_end = 0
+        for gap_start, gap_end, gap_width in gaps:
+            if gap_start - prev_end >= min_column_width:
+                columns.append((prev_end, 0, gap_start - prev_end, row_height))
+            prev_end = gap_end
+        
+        # Add the last column
+        if row_width - prev_end >= min_column_width:
+            columns.append((prev_end, 0, row_width - prev_end, row_height))
+    
+    return columns
 
 def detect_colored_regions(img, sat_thresh=40, area_thresh=5000):
     """
@@ -140,7 +163,6 @@ def detect_colored_regions(img, sat_thresh=40, area_thresh=5000):
         if w * h >= area_thresh:
             boxes.append((x, y, w, h))
     return boxes
-
 
 def group_text_boxes_proximity(img_shape, text_boxes, x_threshold=100, y_threshold=100):
     """
@@ -230,9 +252,8 @@ def group_text_boxes_proximity(img_shape, text_boxes, x_threshold=100, y_thresho
 
     return groups
 
-
-def extract_products_from_pdf(pdf_path, output_dir="output_products_text_group", debug_path_prefix="debug_output_page_", x_threshold=200, y_threshold=150, min_chars=100):
-    """Main function to process all pages of the PDF and extract products using text clustering."""
+def extract_products_from_pdf(pdf_path, output_dir="output_products_individual", debug_path_prefix="debug_output_page_", x_threshold=200, y_threshold=150, min_chars=100):
+    """Main function to process all pages of the PDF and extract individual products."""
     directory = f"{output_dir}-{x_threshold}-{y_threshold}/{pdf_path}"
     os.makedirs(directory, exist_ok=True)
 
@@ -244,7 +265,7 @@ def extract_products_from_pdf(pdf_path, output_dir="output_products_text_group",
     print(f"Processing PDF with {num_pages} page(s).")
     doc.close() # Close immediately after getting page count
 
-    total_products_rows_found = 0
+    total_products_found = 0
     for page_num in range(num_pages):
         print(f"\n--- Processing Page {page_num + 1} ---")
         # Step 1: Convert PDF page to image
@@ -262,7 +283,6 @@ def extract_products_from_pdf(pdf_path, output_dir="output_products_text_group",
         image_boxes = detect_colored_regions(img, sat_thresh=40, area_thresh=30000)
 
         # Step 3: First cluster into rows
-        # rows = cluster_by_rows(text_boxes, row_gap=650)  # adjust row_gap as needed
         rows = assign_text_to_images(text_boxes, image_boxes, row_gap=50)
         grouped_boxes_with_chars = []
         for row in rows:
@@ -271,21 +291,20 @@ def extract_products_from_pdf(pdf_path, output_dir="output_products_text_group",
 
         # Filter groups based on character count
         print(f"Filtering groups with at least {min_chars} characters...")
-        filtered_product_boxes = [box for box in grouped_boxes_with_chars if box[4] >= min_chars] # box[4] is the character count
+        filtered_product_rows = [box for box in grouped_boxes_with_chars if box[4] >= min_chars]
 
-        print(f"Found {len(grouped_boxes_with_chars)} groups before filtering, {len(filtered_product_boxes)} after filtering on page {page_num + 1}.")
+        print(f"Found {len(grouped_boxes_with_chars)} groups before filtering, {len(filtered_product_rows)} after filtering on page {page_num + 1}.")
 
-        # Step 4: Create debug image for the current page (only show filtered boxes)
-        debug_path = f"{directory}/{debug_path_prefix}{page_num + 1}.png"
-        print(f"Creating debug image for page {page_num + 1}: {debug_path}")
+        # Step 4: Process each product row to find individual products
+        page_products = []
         debug_img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(debug_img_pil)
 
-        # --- Draw product image detections (blue) ---
+        # Draw image boxes (blue)
         for (x, y, w, h) in image_boxes:
             draw.rectangle([x, y, x + w, y + h], outline="blue", width=3)
 
-        # --- Draw row spans (green) ---
+        # Draw rows (green)
         for i, row in enumerate(rows):
             if not row:
                 continue
@@ -293,34 +312,79 @@ def extract_products_from_pdf(pdf_path, output_dir="output_products_text_group",
             max_x = max(b[0] + b[2] for b in row)
             min_y = min(b[1] for b in row)
             max_y = max(b[1] + b[3] for b in row)
-            draw.rectangle([min_x, min_y, max_x, max_y], outline="green", width=3)
-            draw.text((min_x + 5, min_y - 15), f"Row {i}", fill="green")
+            draw.rectangle([min_x, min_y, max_x, max_y], outline="green", width=2)
 
-        # --- Draw final product groups (red) ---
-        for i, (x, y, w, h, char_count) in enumerate(filtered_product_boxes):
-            print(f"  Product row {total_products_rows_found + i} (Page {page_num + 1}): ({x}, {y}, {w}, {h}), Chars: {char_count}")
-            draw.rectangle([x, y, x + w, y + h], outline="red", width=3)
-            draw.text((x + 5, y + 5), f"Prod {total_products_rows_found + i} ({char_count})", fill="red")
-            debug_img_pil.save(debug_path)
+        for row_idx, (row_x, row_y, row_w, row_h, char_count) in enumerate(filtered_product_rows):
+            print(f"\n  Processing product row {row_idx} on page {page_num + 1}...")
+            
+            # Extract the row image
+            row_img = img[row_y:row_y+row_h, row_x:row_x+row_w]
+            
+            # Get text boxes that fall within this row (convert coordinates to row-relative)
+            text_boxes_in_row = []
+            for text_box in text_boxes:
+                tx, ty, tw, th, text = text_box
+                # Check if text box is within the row boundaries
+                if (row_x <= tx <= row_x + row_w and row_y <= ty <= row_y + row_h):
+                    # Convert to row-relative coordinates
+                    rel_x = tx - row_x
+                    rel_y = ty - row_y
+                    text_boxes_in_row.append((rel_x, rel_y, tw, th, text))
+            
+            # Detect individual product columns within this row
+            product_columns = detect_product_columns_in_row(
+                row_img, 
+                text_boxes_in_row, 
+                min_column_width=150,  # Adjust as needed
+                gap_threshold=50       # Adjust as needed
+            )
+            
+            print(f"    Found {len(product_columns)} products in row {row_idx}")
+            
+            # Draw row boundary (red)
+            draw.rectangle([row_x, row_y, row_x + row_w, row_y + row_h], outline="red", width=3)
+            draw.text((row_x + 5, row_y + 5), f"Row {row_idx}", fill="red")
+            
+            # Extract and save individual products
+            for col_idx, (col_x, col_y, col_w, col_h) in enumerate(product_columns):
+                # Convert column coordinates back to original image coordinates
+                abs_col_x = row_x + col_x
+                abs_col_y = row_y + col_y
+                
+                # Draw product boundary (yellow)
+                draw.rectangle([abs_col_x, abs_col_y, abs_col_x + col_w, abs_col_y + col_h], 
+                             outline="yellow", width=2)
+                draw.text((abs_col_x + 5, abs_col_y + 20), f"P{total_products_found}", fill="yellow")
+                
+                # Extract product image
+                product_img = row_img[col_y:col_y+col_h, col_x:col_x+col_w]
+                
+                # Save individual product
+                output_path = os.path.join(directory, f"product_page{page_num + 1}_row{row_idx}_col{col_idx}.png")
+                cv2.imwrite(output_path, product_img)
+                
+                page_products.append({
+                    'page': page_num + 1,
+                    'row': row_idx,
+                    'column': col_idx,
+                    'bbox': (abs_col_x, abs_col_y, col_w, col_h),
+                    'path': output_path
+                })
+                
+                print(f"      Saved product {total_products_found} to {output_path}")
+                total_products_found += 1
 
+        # Save debug image
+        debug_path = f"{directory}/{debug_path_prefix}{page_num + 1}.png"
+        debug_img_pil.save(debug_path)
+        print(f"Saved debug image: {debug_path}")
 
-        # Step 5: Extract and save individual product images (only from filtered boxes) for the current page
-        print(f"Extracting {len(filtered_product_boxes)} products rows from page {page_num + 1}...")
-        for i, (x, y, w, h, char_count) in enumerate(filtered_product_boxes):
-            product_img = img[y:y+h, x:x+w]
-            # Use a unique filename including page and product number
-            output_path = os.path.join(directory, f"product_row_{page_num + 1}_num{i}.png")
-            cv2.imwrite(output_path, product_img)
-            print(f"  Saved product row {total_products_rows_found + i} (chars: {char_count}) from page {page_num + 1} to {output_path}")
-
-        total_products_rows_found += len(filtered_product_boxes)
-
-    print(f"\nAll pages processed. Total products extracted: {total_products_rows_found}")
-    print(f"Check '{directory}' for product row images and '{debug_path_prefix}*.png' for the debug images.")
+    print(f"\nAll pages processed. Total individual products extracted: {total_products_found}")
+    print(f"Check '{directory}' for individual product images and debug images.")
 
 # --- Run the extraction ---
 
-input_pdf_path = "amazon.pdf" # "amazon.pdf" / "ricerca_animali.pdf"
+input_pdf_path = "page_3.pdf" # "amazon.pdf" / "ricerca_animali.pdf"
 
 # Thresholds for grouping text boxes (pixels)
 # x_threshold: How far horizontally a text box can be from the group's bounding box
@@ -334,5 +398,5 @@ min_char_count = 400 # Adjust this value as needed (e.g., 100, 150, 200, 300)
 x_steps = [400] #[250, 300, 350]
 y_steps = [200]
 for step in x_steps:
-# --- Run the extraction ---
+    # --- Run the extraction ---
     extract_products_from_pdf(input_pdf_path, x_threshold=step, y_threshold=y_threshold, min_chars=min_char_count)
