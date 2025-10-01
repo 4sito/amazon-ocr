@@ -1,0 +1,7 @@
+pymupdf>=1.22.0
+pillow>=9.0.0
+pytesseract>=0.3.10
+opencv-python-headless>=4.7.0
+numpy>=1.21
+pandas>=1.5
+python-dateutil

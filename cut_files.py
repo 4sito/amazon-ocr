@@ -7,6 +7,7 @@ import os, shutil
 import pandas as pd
 import re
 from datetime import datetime
+import sys
 
 def clear_directory(folder):
     for filename in os.listdir(folder):
@@ -464,10 +465,14 @@ def extract_products_from_pdf(pdf_path, output_dir="output_products_data", x_thr
 
 # Run the extraction
 if __name__ == "__main__":
+    pdf = sys.argv[1]
     pdfs = ["page_3.pdf", "page_9.pdf", "ricerca_animali.pdf"]
     # Parameters
     x_threshold = 400  # Horizontal grouping threshold
     y_threshold = 100  # Vertical grouping threshold
     min_char_count = 400  # Minimum characters for a product group
-    for pdf in pdfs:    
+    if pdf:
         extract_products_from_pdf(pdf, x_threshold=x_threshold, y_threshold=y_threshold, min_chars=min_char_count)
+    else: 
+        for pdf in pdfs:    
+            extract_products_from_pdf(pdf, x_threshold=x_threshold, y_threshold=y_threshold, min_chars=min_char_count)
