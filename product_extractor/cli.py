@@ -1,6 +1,7 @@
 # product_extractor/cli.py
 import argparse
 from .extractor import extract_products_from_pdf
+from .thresholds import compute_thresholds_from_pdf
 
 def main():
     parser = argparse.ArgumentParser(description="Extract product info from catalog PDF.")
@@ -22,7 +23,18 @@ def main():
             min_confidence=args.min_confidence
         )
     else:
-        print("Please provide a PDF path. Example: python -m product_extractor.cli myfile.pdf")
+        # t = compute_thresholds_from_pdf("candeggina.pdf", page=0, dpi=200)
+        # x_threshold = t["x_threshold"]
+        # y_threshold = t["y_threshold"]
+
+        extract_products_from_pdf(
+            "candeggina.pdf",
+            output_dir="test_dir",
+            min_confidence=30,
+            # x_threshold=x_threshold,
+            # y_threshold=y_threshold,
+            min_chars=300,
+        )
 
 if __name__ == "__main__":
     main()

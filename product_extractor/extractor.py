@@ -1,13 +1,33 @@
 # product_extractor/extractor.py
-from typing import List, Dict
+from typing import List, Dict, Tuple
 import os
 from datetime import datetime
 import pandas as pd
+import fitz
+import cv2
 from .commons import init_dir
 from .pdf_utils import pdf_to_image
 from .ocr_utils import get_text_boxes
 from .detection import detect_colored_regions, assign_text_to_images, group_text_boxes_proximity, detect_product_columns_in_row
 from .analyze import analyze_product_image
+from .thresholds import compute_thresholds_from_image
+
+def calculate_dynamic_thresholds(img_shape, x_ratio=0.50, y_ratio=0.50):
+    """
+    Calculate thresholds as a percentage of image dimensions.
+    
+    Args:
+        img_shape: (height, width, channels) from the image
+        x_ratio: percentage of width (default 15%)
+        y_ratio: percentage of height (default 5%)
+    
+    Returns:
+        x_threshold, y_threshold
+    """
+    height, width = img_shape[:2]
+    x_threshold = int(width * x_ratio)
+    y_threshold = int(height * y_ratio)
+    return x_threshold, y_threshold
 
 def extract_products_from_pdf(
     pdf_path: str,
@@ -23,7 +43,6 @@ def extract_products_from_pdf(
     init_dir(debug_dir)
 
     try:
-        import fitz
         doc = fitz.open(pdf_path)
         num_pages = doc.page_count
         doc.close()
@@ -42,6 +61,7 @@ def extract_products_from_pdf(
         if img is None:
             continue
 
+        x_threshold, y_threshold = compute_thresholds_from_image(img)
         text_boxes = get_text_boxes(img, min_confidence=min_confidence)
         image_boxes = detect_colored_regions(img, sat_thresh=40, area_thresh=30000)
         rows = assign_text_to_images(text_boxes, image_boxes, row_gap=50)
@@ -71,7 +91,6 @@ def extract_products_from_pdf(
                 product_path = os.path.join(base_dir, f"product_{total_found}.png")
                 cv2_ok = False
                 try:
-                    import cv2
                     cv2_ok = cv2.imwrite(product_path, product_img)
                 except Exception as e:
                     print(f"Failed to write product image: {e}")
