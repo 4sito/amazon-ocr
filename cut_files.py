@@ -105,37 +105,90 @@ def assign_text_to_images(text_boxes, image_boxes, row_gap=50):
             rows.append(row_text)
     return rows
 
-def detect_product_columns_in_row(row_img, text_boxes_in_row, min_column_width=200, gap_threshold=50):
-    """Detects individual product columns within a product row."""
-    if not text_boxes_in_row:
-        return [(0, 0, row_img.shape[1], row_img.shape[0])]
+def detect_product_columns_in_row(row_img, text_boxes_in_row, num_products=2):
+    """
+    Detects individual product columns within a product row based on expected number of products.
+    
+    Args:
+        row_img: Image of the product row
+        text_boxes_in_row: List of text boxes in the row
+        num_products: Expected number of products per row (default 2)
+    
+    Returns:
+        List of column bounding boxes (x, y, w, h)
+    """
+    row_height = row_img.shape[0]
+    row_width = row_img.shape[1]
+    
+    # If no text boxes or single product, return full width
+    if not text_boxes_in_row or num_products <= 1:
+        return [(0, 0, row_width, row_height)]
+    
+    # Calculate expected column width and gap threshold based on num_products
+    expected_column_width = row_width / num_products
+    min_column_width = int(expected_column_width * 0.5)  # At least 50% of expected width
+    gap_threshold = int(expected_column_width * 0.15)  # Gap should be ~15% of column width
+    
+    print(f"    Row width: {row_width}, Expected products: {num_products}")
+    print(f"    Expected column width: {expected_column_width:.0f}, Min: {min_column_width}, Gap threshold: {gap_threshold}")
+    
+    # Get all x positions from text boxes
     x_positions = []
     for box in text_boxes_in_row:
         x, y, w, h, text = box
         x_positions.extend([x, x + w])
     x_positions = sorted(set(x_positions))
+    
+    # Find gaps between text regions
     gaps = []
     for i in range(len(x_positions) - 1):
         gap_start = x_positions[i]
         gap_end = x_positions[i + 1]
         gap_width = gap_end - gap_start
-        has_text_in_gap = any(box[0] < gap_end and box[0] + box[2] > gap_start for box in text_boxes_in_row)
+        
+        # Check if there's text in this gap
+        has_text_in_gap = any(box[0] < gap_end and box[0] + box[2] > gap_start 
+                             for box in text_boxes_in_row)
+        
         if not has_text_in_gap and gap_width >= gap_threshold:
             gaps.append((gap_start, gap_end, gap_width))
+    
+    # Build columns from gaps
     columns = []
-    row_height = row_img.shape[0]
-    row_width = row_img.shape[1]
+    
     if not gaps:
-        columns.append((0, 0, row_width, row_height))
+        # No significant gaps found, divide equally
+        print(f"    No gaps found, dividing equally into {num_products} columns")
+        for i in range(num_products):
+            col_x = int(i * expected_column_width)
+            col_w = int(expected_column_width)
+            # Adjust last column to reach end
+            if i == num_products - 1:
+                col_w = row_width - col_x
+            columns.append((col_x, 0, col_w, row_height))
     else:
+        # Use detected gaps to separate columns
         gaps = sorted(gaps, key=lambda g: g[0])
+        print(f"    Found {len(gaps)} gaps")
+        
+        # Select the most significant gaps (up to num_products - 1)
+        if len(gaps) > num_products - 1:
+            # Sort by gap width and take the largest ones
+            gaps = sorted(gaps, key=lambda g: g[2], reverse=True)[:num_products - 1]
+            # Re-sort by position
+            gaps = sorted(gaps, key=lambda g: g[0])
+        
         prev_end = 0
         for gap_start, gap_end, gap_width in gaps:
             if gap_start - prev_end >= min_column_width:
                 columns.append((prev_end, 0, gap_start - prev_end, row_height))
             prev_end = gap_end
+        
+        # Add final column
         if row_width - prev_end >= min_column_width:
             columns.append((prev_end, 0, row_width - prev_end, row_height))
+    
+    print(f"    Created {len(columns)} columns")
     return columns
 
 def detect_colored_regions(img, sat_thresh=40, area_thresh=5000):
@@ -216,10 +269,9 @@ def group_text_boxes_proximity(img_shape, text_boxes, x_threshold=100, y_thresho
 
 def extract_price(text_content):
     """Estrae il prezzo principale. Formato: 7,28 € o 7.28€"""
-    # Pattern migliorato per prezzi
     patterns = [
-        r'(\d+)[,\.](\d{2})\s*€',  # 7,28 € o 7.28€
-        r'(\d+)(\d{2})\s*€',        # 728 €
+        r'(\d+)[,\.](\d{2})\s*€',
+        r'(\d+)(\d{2})\s*€',
     ]
     
     for pattern in patterns:
@@ -233,10 +285,9 @@ def extract_price(text_content):
 
 def extract_unit_price(text_content):
     """Estrae prezzo per unità. Formato: (4,55€/kg)"""
-    # Pattern per prezzo unitario
     patterns = [
-        r'\((\d+[,\.]\d+)€/(\w+)\)',  # (4,55€/kg)
-        r'(\d+[,\.]\d+)\s*€\s*/\s*(\w+)',  # 4,55 € / kg
+        r'\((\d+[,\.]\d+)€/(\w+)\)',
+        r'(\d+[,\.]\d+)\s*€\s*/\s*(\w+)',
     ]
     
     for pattern in patterns:
@@ -256,7 +307,6 @@ def extract_unit_measure(text_content):
 
 def extract_rating(text_content):
     """Estrae valutazione. Formato: 4,3"""
-    # Cerca valutazione (numero tra 0 e 5 con virgola)
     rating_pattern = r'\b([0-5][,\.]\d)\b'
     match = re.search(rating_pattern, text_content)
     if match:
@@ -265,11 +315,9 @@ def extract_rating(text_content):
 
 def extract_reviews_count(text_content):
     """Estrae numero recensioni. Formato: (2229)"""
-    # Cerca numeri tra parentesi
     reviews_pattern = r'\((\d+)\)'
     matches = re.findall(reviews_pattern, text_content)
     if matches:
-        # Prende il numero più grande (probabilmente le recensioni)
         return max(matches, key=lambda x: int(x))
     return ""
 
@@ -277,23 +325,19 @@ def extract_delivery_info(text_content):
     """Estrae informazioni sulla consegna"""
     text_lower = text_content.lower()
     
-    # Cerca "Consegna GRATUITA"
     if 'consegna gratuita' in text_lower or 'consegna gratis' in text_lower:
         return "Consegna GRATUITA"
     
-    # Cerca pattern di consegna con prezzo
     delivery_pattern = r'[Cc]onsegna.*?(\d+[,\.]\d+)\s*€'
     match = re.search(delivery_pattern, text_content)
     if match:
         price = match.group(1).replace('.', ',')
         return f"Consegna {price}€"
     
-    # Cerca semplicemente "Consegna" e prende il testo seguente
     if 'consegna' in text_lower:
         parts = text_content.split('onsegna')
         if len(parts) > 1:
             delivery_text = "Consegna" + parts[1].strip()
-            # Limita lunghezza
             if len(delivery_text) > 100:
                 delivery_text = delivery_text[:100] + "..."
             return delivery_text
@@ -318,17 +362,11 @@ def analyze_product_image(product_img, product_id, debug_dir, ricerca="", user_i
     """Analizza singola immagine prodotto ed estrae tutti i dati."""
     print(f"\n  Analyzing product {product_id}...")
     
-    # Upscale per miglior OCR
     upscaled_img = upscale_image(product_img, scale_factor=2)
-    
-    # Ottieni tutto il testo con OCR
     text_boxes = get_text_boxes(upscaled_img, min_confidence=30)
-    
-    # Combina tutto il testo
     full_text = " ".join([box[4] for box in text_boxes])
-    print(f"    OCR text: {full_text[:200]}...")  # Mostra primi 200 caratteri
+    print(f"    OCR text: {full_text[:200]}...")
     
-    # Estrai tutti i dati
     data = {
         'id_utente': user_id,
         'ricerca': ricerca,
@@ -344,11 +382,9 @@ def analyze_product_image(product_img, product_id, debug_dir, ricerca="", user_i
         'login': ''
     }
     
-    # Crea immagine debug con bounding boxes
     debug_img = Image.fromarray(cv2.cvtColor(upscaled_img, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(debug_img)
     
-    # Colori per diversi tipi di dati
     colors = {
         'prezzo': 'red',
         'valutazione': 'blue',
@@ -358,12 +394,10 @@ def analyze_product_image(product_img, product_id, debug_dir, ricerca="", user_i
         'scelta_amazon': 'gold'
     }
     
-    # Evidenzia text boxes rilevanti
     for x, y, w, h, text in text_boxes:
         box_color = 'gray'
         label = ''
         
-        # Identifica tipo di dato
         if re.search(r'\d+[,\.]\d{2}\s*€', text) and '/' not in text:
             box_color = colors['prezzo']
             label = 'PREZZO'
@@ -387,11 +421,9 @@ def analyze_product_image(product_img, product_id, debug_dir, ricerca="", user_i
         if label:
             draw.text((x, y-15), label, fill=box_color)
     
-    # Salva immagine debug
     debug_path = os.path.join(debug_dir, f"product_{product_id}_debug.png")
     debug_img.save(debug_path)
     
-    # Mostra dati estratti
     print(f"    ✓ Prezzo: {data['prezzo']}")
     print(f"    ✓ Prezzo/unità: {data['prezzo_per_unita']}")
     print(f"    ✓ Rating: {data['valutazione_media']}")
@@ -403,7 +435,8 @@ def analyze_product_image(product_img, product_id, debug_dir, ricerca="", user_i
 
 def extract_products_from_pdf(pdf_path, output_dir="output_amazon_products", 
                               ricerca="", user_id="",
-                              x_ratio=0.5, y_ratio=0.1, min_chars=400):
+                              x_ratio=0.5, y_ratio=0.1, min_chars=400, 
+                              num_products_per_row=2):
     """Funzione principale per processare PDF ed estrarre dati prodotti."""
     directory = f"{output_dir}/{pdf_path.replace('.pdf', '')}"
     init_dir(directory)
@@ -411,13 +444,13 @@ def extract_products_from_pdf(pdf_path, output_dir="output_amazon_products",
     debug_dir = os.path.join(f"{directory}/debug_images")
     init_dir(debug_dir)
 
-    # Apri PDF
     doc = fitz.open(pdf_path)
     num_pages = doc.page_count
     print(f"\n{'='*60}")
     print(f"Processing PDF: {pdf_path}")
     print(f"Total pages: {num_pages}")
     print(f"Ricerca: {ricerca}")
+    print(f"Products per row: {num_products_per_row}")
     print(f"{'='*60}")
     doc.close()
 
@@ -427,34 +460,28 @@ def extract_products_from_pdf(pdf_path, output_dir="output_amazon_products",
     for page_num in range(num_pages):
         print(f"\n--- Page {page_num + 1}/{num_pages} ---")
         
-        # Converti pagina PDF in immagine
         img = pdf_to_image(pdf_path, page_num)
         if img is None:
             continue
         
         x_threshold, y_threshold = calculate_dynamic_thresholds(img.shape, x_ratio, y_ratio)
-        print(x_threshold)
-        print(y_threshold)
-        # Ottieni text boxes e rileva regioni colorate
+        print(f"Thresholds - X: {x_threshold}, Y: {y_threshold}")
+        
         text_boxes = get_text_boxes(img)
         image_boxes = detect_colored_regions(img, sat_thresh=40, area_thresh=30000)
 
-        # Raggruppa in righe e prodotti
         rows = assign_text_to_images(text_boxes, image_boxes, row_gap=50)
         grouped_boxes_with_chars = []
         for row in rows:
             row_groups = group_text_boxes_proximity(img.shape, row, x_threshold, y_threshold)
             grouped_boxes_with_chars.extend(row_groups)
 
-        # Filtra per numero caratteri
         filtered_product_rows = [box for box in grouped_boxes_with_chars if box[4] >= min_chars]
         print(f"Found {len(filtered_product_rows)} product rows")
 
-        # Processa ogni riga prodotto
         for row_idx, (row_x, row_y, row_w, row_h, char_count) in enumerate(filtered_product_rows):
             row_img = img[row_y:row_y+row_h, row_x:row_x+row_w]
             
-            # Text boxes nella riga
             text_boxes_in_row = []
             for text_box in text_boxes:
                 tx, ty, tw, th, text = text_box
@@ -463,24 +490,32 @@ def extract_products_from_pdf(pdf_path, output_dir="output_amazon_products",
                     rel_y = ty - row_y
                     text_boxes_in_row.append((rel_x, rel_y, tw, th, text))
             
-            # Rileva colonne prodotti
+            # Use num_products_per_row parameter
             product_columns = detect_product_columns_in_row(
                 row_img, text_boxes_in_row, 
-                min_column_width=150, gap_threshold=50
+                num_products=num_products_per_row
             )
             
-            # Processa ogni prodotto
             for col_idx, (col_x, col_y, col_w, col_h) in enumerate(product_columns):
-                total_products_found += 1
-                
-                # Estrai immagine prodotto
                 product_img = row_img[col_y:col_y+col_h, col_x:col_x+col_w]
                 
-                # Salva immagine prodotto
+                # Count characters in this product column
+                product_text_boxes = [b for b in text_boxes_in_row 
+                                     if col_x <= b[0] <= col_x + col_w]
+                product_char_count = sum(len(b[4]) for b in product_text_boxes)
+                
+                print(f"  Product column {col_idx}: {product_char_count} chars")
+                
+                # Skip if below minimum character threshold
+                if product_char_count < min_chars:
+                    print(f"    ⚠️  Skipped (below {min_chars} chars threshold)")
+                    continue
+                
+                total_products_found += 1
+                
                 product_path = os.path.join(directory, f"product_{total_products_found}.png")
                 cv2.imwrite(product_path, product_img)
                 
-                # Analizza ed estrai dati
                 product_data = analyze_product_image(
                     product_img, total_products_found, debug_dir, 
                     ricerca=ricerca, user_id=user_id
@@ -492,11 +527,9 @@ def extract_products_from_pdf(pdf_path, output_dir="output_amazon_products",
                 
                 all_products_data.append(product_data)
 
-    # Crea file Excel
     if all_products_data:
         df = pd.DataFrame(all_products_data)
         
-        # Riordina colonne come richiesto
         column_order = [
             'id_utente', 'ricerca', 'ordinamento', 'sponsorizzato', 'scelta_amazon',
             'prezzo', 'prezzo_per_unita', 'unita_di_misura', 'prezzo_consegna',
@@ -517,7 +550,6 @@ def extract_products_from_pdf(pdf_path, output_dir="output_amazon_products",
         print(f"Debug: {debug_dir}")
         print(f"{'='*60}")
         
-        # Mostra campione dati
         print(f"\n=== SAMPLE DATA (first 2 products) ===")
         for i, product in enumerate(all_products_data[:2]):
             print(f"\nProduct {i+1}:")
@@ -532,20 +564,16 @@ def extract_products_from_pdf(pdf_path, output_dir="output_amazon_products",
 
 # ESECUZIONE
 if __name__ == "__main__":
-    # Lista PDF da processare
     pdfs_config = [
-        {"file": "testfile.pdf", "ricerca": "amazon", "user_id": "user"}
-     ]
-       # {"file": "page_9.pdf", "ricerca": "cibo per gatti", "user_id": "user001"},
-       # {"file": "ricerca_animali.pdf", "ricerca": "prodotti animali", "user_id": "user001"},
-   # ]
+        {"file": "candeggina.pdf", "ricerca": "amazon", "user_id": "user"}
+    ]
     
     # Parametri
-    x_ratio = 0.5  # Soglia raggruppamento orizzontale
-    y_ratio = 0.20  # Soglia raggruppamento verticale
-    min_char_count = 400  # Minimo caratteri per gruppo prodotto
+    x_ratio = 0.9  # proporzione orizzontale di una riga di prodotti
+    y_ratio = 0.5  # proporzione verticale di una riga di prodotti
+    min_char_count = 200  # Minimo caratteri per gruppo prodotto
+    num_products_per_row = 2  # Numero di prodotti attesi per riga
     
-    # Processa ogni PDF
     for pdf_config in pdfs_config:
         pdf_file = pdf_config["file"]
         if os.path.exists(pdf_file):
@@ -555,7 +583,8 @@ if __name__ == "__main__":
                 user_id=pdf_config["user_id"],
                 x_ratio=x_ratio, 
                 y_ratio=y_ratio, 
-                min_chars=min_char_count
+                min_chars=min_char_count,
+                num_products_per_row=num_products_per_row
             )
         else:
             print(f"\n⚠️  File not found: {pdf_file}")
